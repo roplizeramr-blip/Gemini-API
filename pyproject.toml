@@ -27,6 +27,11 @@ dynamic = ["version"]
 
 [project.optional-dependencies]
 browser = ["browser-cookie3"]
+gateway = [
+  "fastapi>=0.116,<1",
+  "python-multipart>=0.0.20,<1",
+  "uvicorn[standard]>=0.35,<1",
+]
 dev = ["pyright", "ruff", "ty"]
 
 [dependency-groups]
