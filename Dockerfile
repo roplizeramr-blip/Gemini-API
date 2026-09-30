@@ -21,4 +21,4 @@ RUN python -m pip install --upgrade pip \
 
 EXPOSE 8080
 
-CMD ["sh", "-c", "exec uvicorn gateway.main:app --host 0.0.0.0 --port $" + "{PORT:-8080} --proxy-headers --forwarded-allow-ips='*'"]
+CMD ["sh", "-c", "exec uvicorn gateway.main:app --host 0.0.0.0 --port ${PORT:-8080} --proxy-headers --forwarded-allow-ips='*'"]
