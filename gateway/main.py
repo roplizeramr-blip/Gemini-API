@@ -11,7 +11,7 @@ import sqlite3
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
@@ -186,8 +186,8 @@ def require_api_key(authorization: str | None, x_api_key: str | None) -> None:
 
 
 def auth_dependency(
-    authorization: str | None = Header(default=None),
-    x_api_key: str | None = Header(default=None),
+    authorization: Annotated[str | None, Header()] = None,
+    x_api_key: Annotated[str | None, Header()] = None,
 ) -> None:
     require_api_key(authorization, x_api_key)
 
