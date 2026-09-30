@@ -26,6 +26,7 @@ from gemini_webapi.utils import logger
 
 DATA_DIR = Path(os.getenv("GATEWAY_DATA_DIR", "/data/gateway"))
 UPLOAD_DIR = DATA_DIR / "uploads"
+GENERATED_DIR = DATA_DIR / "generated"
 DB_PATH = DATA_DIR / "gateway.sqlite3"
 MAX_UPLOAD_BYTES = int(os.getenv("MAX_UPLOAD_MB", "50")) * 1024 * 1024
 
@@ -68,6 +69,7 @@ def db() -> sqlite3.Connection:
 def init_db() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
     with db() as connection:
         connection.execute(
             """
@@ -226,6 +228,15 @@ class ImageGenerationRequest(BaseModel):
     model_config = ConfigDict(extra="allow")
     prompt: str
     model: str | None = None
+    n: int = 1
+    file_ids: list[str] = Field(default_factory=list)
+
+
+class ImageEditRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    prompt: str
+    model: str | None = None
+    file_ids: list[str] = Field(default_factory=list)
     n: int = 1
 
 
@@ -731,18 +742,53 @@ async def chat_completions(request: ChatRequest) -> Any:
     }
 
 
+async def materialize_generated_images(images: list[Any], prompt: str, limit: int = 1) -> list[dict[str, Any]]:
+    results: list[dict[str, Any]] = []
+    for index, image in enumerate(images):
+        if type(image).__name__ != "GeneratedImage":
+            continue
+        filename = f"generated_{int(time.time())}_{uuid4().hex[:8]}_{index}.png"
+        try:
+            saved = await image.save(path=str(GENERATED_DIR), filename=filename, full_size=True)
+            payload = Path(saved).read_bytes()
+            results.append({
+                "url": "data:image/png;base64," + base64.b64encode(payload).decode("ascii"),
+                "revised_prompt": prompt,
+                "filename": Path(saved).name,
+                "bytes": len(payload),
+            })
+        except Exception as exc:
+            logger.warning("Could not materialize generated image: {}", exc)
+    return results[:max(1, limit)]
+
+
 @app.post("/v1/images/generations", dependencies=[Depends(auth_dependency)])
 async def image_generations(request: ImageGenerationRequest) -> dict[str, Any]:
+    files = [load_file_record(file_id) for file_id in request.file_ids]
+    prompt = request.prompt.strip()
+    if "generate" not in prompt.lower() and "create" not in prompt.lower():
+        prompt = "GENERATE an image: " + prompt
     output, _ = await generate_native(
-        request.prompt, request.model, None, None, True, False, False, []
+        prompt, request.model, None, None, True, False, False, files
     )
-    return {
-        "created": int(time.time()),
-        "data": [
-            {"url": image.url, "revised_prompt": request.prompt}
-            for image in output.images[: max(1, request.n)]
-        ],
-    }
+    data = await materialize_generated_images(output.images, request.prompt, request.n)
+    return {"created": int(time.time()), "data": data, "text": output.text or "", "x_gemini": serialize_output(output)}
+
+
+@app.post("/v1/images/edits", dependencies=[Depends(auth_dependency)])
+async def image_edits(request: ImageEditRequest) -> dict[str, Any]:
+    if not request.file_ids:
+        raise HTTPException(status_code=400, detail="file_ids must contain at least one image file")
+    files = [load_file_record(file_id) for file_id in request.file_ids]
+    prompt = request.prompt.strip()
+    if not prompt:
+        raise HTTPException(status_code=400, detail="prompt must not be empty")
+    output, _ = await generate_native(
+        "EDIT the provided image(s): " + prompt,
+        request.model, None, None, True, False, False, files
+    )
+    data = await materialize_generated_images(output.images, request.prompt, request.n)
+    return {"created": int(time.time()), "data": data, "text": output.text or "", "x_gemini": serialize_output(output)}
 
 
 @app.get("/", include_in_schema=False)
