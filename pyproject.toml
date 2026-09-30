@@ -45,7 +45,7 @@ Issues = "https://github.com/HanaokaYuzu/Gemini-API/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
-include = ["gemini_webapi"]
+include = ["gemini_webapi*"]
 
 [tool.setuptools_scm]
 version_scheme = "post-release"
