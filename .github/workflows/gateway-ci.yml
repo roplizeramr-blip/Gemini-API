@@ -19,3 +19,7 @@ jobs:
         run: python -m compileall -q src gateway cli.py
       - name: Ruff
         run: ruff check gateway
+      - name: Import gateway
+        run: python -c "from gateway.main import app; print(app.title)"
+      - name: Build Docker image
+        run: docker build --tag gemini-gateway-ci .
