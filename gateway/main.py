@@ -18,6 +18,11 @@ from uuid import uuid4
 from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
+
+try:
+    from google import genai
+except ImportError:  # pragma: no cover - optional gateway dependency
+    genai = None
 from pydantic import BaseModel, ConfigDict, Field
 
 from gemini_webapi import GeminiClient
@@ -34,6 +39,8 @@ GATEWAY_API_KEY = os.getenv("GATEWAY_API_KEY", "").strip()
 GEMINI_1PSID = os.getenv("GEMINI_SECURE_1PSID", "").strip()
 GEMINI_1PSIDTS = os.getenv("GEMINI_SECURE_1PSIDTS", "").strip()
 GEMINI_PROXY = os.getenv("GEMINI_PROXY", "").strip() or None
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_INTERACTIONS_MODEL = os.getenv("GEMINI_INTERACTIONS_MODEL", "gemini-3.8-flash").strip()
 GEMINI_COOKIE_PATH = os.getenv("GEMINI_COOKIE_PATH", "/data/gemini/cookies")
 os.environ.setdefault("GEMINI_COOKIE_PATH", GEMINI_COOKIE_PATH)
 
@@ -48,6 +55,7 @@ def env_bool(name: str, default: bool = False) -> bool:
 class GatewayState:
     def __init__(self) -> None:
         self.client: GeminiClient | None = None
+        self.google_client: Any | None = None
         self.locks: dict[str, asyncio.Lock] = {}
         self.started_at = time.time()
 
@@ -429,6 +437,12 @@ async def lifespan(_: FastAPI):
         logger.warning("GATEWAY_API_KEY is not configured")
 
     client: GeminiClient | None = None
+    if GEMINI_API_KEY and genai is not None:
+        try:
+            state.google_client = genai.Client(api_key=GEMINI_API_KEY)
+            logger.success("Official Gemini Interactions API enabled")
+        except Exception as exc:
+            logger.exception("Official Gemini client initialization failed: {}", exc)
     if GEMINI_1PSID or env_bool("ALLOW_GUEST_SESSION", False):
         client = GeminiClient(
             secure_1psid=GEMINI_1PSID or None,
@@ -458,12 +472,13 @@ async def lifespan(_: FastAPI):
         if state.client is not None:
             await state.client.close()
             state.client = None
+        state.google_client = None
 
 
 app = FastAPI(
     title="Gemini Web Gateway",
     version="2026.09",
-    description="Railway-ready HTTP gateway for the Gemini Web client.",
+    description="Railway-ready Gemini gateway with Gemini Web and optional official Interactions API agent support.",
     lifespan=lifespan,
 )
 
@@ -628,6 +643,84 @@ async def native_research(request: NativeGenerateRequest) -> dict[str, Any]:
         [],
     )
     return {"conversation_id": conversation_id, "result": serialize_output(output)}
+
+
+class InteractionRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    model: str | None = None
+    agent: str | None = None
+    input: Any
+    previous_interaction_id: str | None = None
+    tools: list[dict[str, Any]] = Field(default_factory=list)
+    system_instruction: str | None = None
+    store: bool = True
+    background: bool = False
+    include_thoughts: bool | None = None
+
+
+def require_google_interactions() -> Any:
+    if state.google_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="Official Gemini Interactions API is not configured; set GEMINI_API_KEY on Railway.",
+        )
+    return state.google_client
+
+
+def interaction_to_dict(interaction: Any) -> dict[str, Any]:
+    if hasattr(interaction, "model_dump"):
+        return interaction.model_dump(mode="json", exclude_none=True)
+    if hasattr(interaction, "to_dict"):
+        return interaction.to_dict()
+    return {"id": getattr(interaction, "id", None), "output_text": getattr(interaction, "output_text", "")}
+
+
+@app.post("/v1/interactions", dependencies=[Depends(auth_dependency)])
+async def create_interaction(request: InteractionRequest) -> dict[str, Any]:
+    client = require_google_interactions()
+    kwargs: dict[str, Any] = {
+        "model": request.model or GEMINI_INTERACTIONS_MODEL,
+        "input": request.input,
+        "store": request.store,
+        "background": request.background,
+    }
+    if request.agent:
+        kwargs["agent"] = request.agent
+        kwargs.pop("model", None)
+    if request.previous_interaction_id:
+        kwargs["previous_interaction_id"] = request.previous_interaction_id
+    if request.tools:
+        kwargs["tools"] = request.tools
+    if request.system_instruction:
+        kwargs["system_instruction"] = request.system_instruction
+    if request.include_thoughts is not None:
+        kwargs["include_thoughts"] = request.include_thoughts
+
+    try:
+        interaction = await client.aio.interactions.create(**kwargs)
+    except Exception as exc:
+        logger.exception("Official Interactions API request failed: {}", exc)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return interaction_to_dict(interaction)
+
+
+@app.get("/v1/interactions/{interaction_id}", dependencies=[Depends(auth_dependency)])
+async def get_interaction(interaction_id: str) -> dict[str, Any]:
+    client = require_google_interactions()
+    try:
+        interaction = await client.aio.interactions.get(interaction_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return interaction_to_dict(interaction)
+
+
+@app.post("/v1/agent", dependencies=[Depends(auth_dependency)])
+async def agent(request: InteractionRequest) -> dict[str, Any]:
+    """Official Gemini 3.8 Flash agent endpoint."""
+    if request.agent:
+        raise HTTPException(status_code=400, detail="Use /v1/interactions for managed agents")
+    request.model = request.model or GEMINI_INTERACTIONS_MODEL
+    return await create_interaction(request)
 
 
 @app.post("/v1/chat/completions", dependencies=[Depends(auth_dependency)])
