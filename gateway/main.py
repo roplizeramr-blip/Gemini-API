@@ -1,3 +1,4 @@
+# ruff: noqa: I001
 from __future__ import annotations
 
 import asyncio
@@ -103,7 +104,7 @@ def get_conversation(conversation_id: str) -> sqlite3.Row | None:
 
 
 def save_conversation(conversation_id: str, metadata: list[str], title: str = "") -> None:
-    values = [str(x or "") for x in (metadata + ["", "", ""])[:3]]
+    values = [str(x or "") for x in [*metadata, "", "", ""][:3]]
     now = time.time()
     with db() as connection:
         connection.execute(
@@ -556,7 +557,7 @@ async def delete_conversation(conversation_id: str) -> dict[str, Any]:
 
 @app.post("/v1/files", dependencies=[Depends(auth_dependency)])
 @app.post("/api/files", dependencies=[Depends(auth_dependency)])
-async def upload_file(file: UploadFile = File(...)) -> dict[str, Any]:
+async def upload_file(file: Annotated[UploadFile, File(...)]) -> dict[str, Any]:
     data = await file.read(MAX_UPLOAD_BYTES + 1)
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(
@@ -710,23 +711,21 @@ async def chat_completions(request: ChatRequest) -> Any:
         files,
     )
     return {
-        **{
-            "id": f"chatcmpl_{secrets.token_hex(12)}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": request.model or "gemini-web-default",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": output.text or "",
-                        "reasoning_content": output.thoughts,
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
-        },
+        "id": f"chatcmpl_{secrets.token_hex(12)}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": request.model or "gemini-web-default",
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": output.text or "",
+                    "reasoning_content": output.thoughts,
+                },
+                "finish_reason": "stop",
+            }
+        ],
         "x_gemini": serialize_output(output),
         "conversation_id": conversation_id,
     }
